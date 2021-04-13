@@ -1,66 +1,96 @@
-import pandas as pd
+#とあるサイトからスクレイピングを行いhtmlを取得し、csvにしてlambdaからs3へアップロード
 from selenium import webdriver
+import json
 import time
+import datetime
+import csv
+import boto3
 from selenium.webdriver.support.select import Select
 from selenium.webdriver.chrome.options import Options
-from bs4 import BeautifulSoup
-import urllib.request as req
 
-'''Headless設定'''
-options = Options()
-options.binary_location = '../headless/python/bin/headless-chromium'
-options.add_argument('--headless')
-options.add_argument('--no-sandbox')
-options.add_argument("--disable-dev-shm-usage")
-
-'''ブラウザの起動と検索ページへの移動'''
-browser = webdriver.Chrome(executable_path="../headless/python/bin/chromedriver", options=options)
-URL = 'https://etsuran.mlit.go.jp/TAKKEN/kensetuKensaku.do'
-browser.get(URL)
-time.sleep(3)
-
-
-'''検索条件の指定と検索実行'''
-#表示件数の指定(50件表示)
-disp_num_select = browser.find_element_by_xpath('/html/body/form/div/div[2]/div[4]/div/div[6]/div[3]/select')
-select = Select(disp_num_select)
-frm1 = select.select_by_index(4)
-#検索都道府県の指定
-pref_select = browser.find_element_by_xpath('/html/body/form/div/div[2]/div[4]/div/div[5]/div[2]/select[2]')
-select = Select(pref_select)
-frm2 = select.select_by_index(0) #とりあえず北海道でテスト
-button = browser.find_element_by_xpath('/html/body/form/div/div[2]/div[4]/div/div[6]/div[5]/img')
-button.click()
-print('地域を{0}で選択し検索を実行しました'.format(frm2.text))
-
-
-'''検索結果として表示されるurlとhtmlをリストで取得'''
-#検索結果ページ数の取得
-page_num = browser.find_element_by_xpath('/html/body/form/div/div[2]/div[6]/div[3]/select')
-lst = page_num.text.split('/')
-
-for i in lst[1]:
-    #ページ移動
-    page_num_select = Select(page_num)
-    to_page = page_num_select.select_by_index(i)
+def lambda_handler(event, context):
     
-    #検索結果ページのurlを取得
-    current_url = browser.current_url
-    response = req.urlopen(current_url)
+    '''ブラウザの定義と移動'''
+    options = webdriver.ChromeOptions()
+    options.add_argument("--headless")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--hide-scrollbars")
+    options.add_argument("--single-process")
+    options.add_argument("--ignore-certificate-errors")
+    options.add_argument("--window-size=880x996")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--homedir=/tmp")
+    options.add_argument('--user-agent=Mozilla/5.0 (iPhone; CPU iPhone OS 10_2 like Mac OS X) AppleWebKit/602.3.12 (KHTML, like Gecko) Version/10.0 Mobile/14C92 Safari/602.1')
+    options.binary_location = "/opt/python/bin/headless-chromium"
+    URL = "https://etsuran.mlit.go.jp/TAKKEN/kensetuKensaku.do"
+    browser = webdriver.Chrome("/opt/python/bin/chromedriver", options=options)
+    browser.get(URL)
+    time.sleep(3)
     
-    #ページ内<a>タグ全取得からの不要ページの<a>タグ除外
-    parse_html = BeautifulSoup(response, 'html.parser')
-    list_all = parse_html.find_all('a') 
-    #前から9個後ろ1個の<a>タグが不要
-    list_all_a = list_all[9:] #前から9個
-    url_list = list_all_a[:-1] #後から1個
     
-    html_list = []
+    '''検索条件の指定と検索の実行'''
+    #表示件数の指定
+    disp_num_select = browser.find_element_by_xpath('/html/body/form/div/div[2]/div[4]/div/div[6]/div[3]/select')
+    select = Select(disp_num_select)
+    select.select_by_index(4) #50件に設定
     
-    for i in url_list:
-        html = req.get(url_list[i])
-        html_list[i] = BeautifulSoup(html.text, 'html.parser')
+    #検索都道府県の指定
+    pref_select = browser.find_element_by_xpath('/html/body/form/div/div[2]/div[4]/div/div[5]/div[2]/select[2]')
+    select = Select(pref_select)
+    select.select_by_index(1) #北海道が1、沖縄が47のように引数を指定
+    
+    #検索実行
+    button = browser.find_element_by_xpath('/html/body/form/div/div[2]/div[4]/div/div[6]/div[5]/img')
+    button.click()
+    
+    
+    '''メインロジック開始'''
+    obj_html_list = []
+    
+    '''
+    #ページネーターを使って全件取得ループ
+    pagenator = browser.find_element_by_id('pageListNo1')
+    pagenator_select = Select(pagenator)
+    pagenator_list = [i.text for i in pagenator_select.options] #ページネーターの名前リストを作成
+    for item in pagenator_list:
+        pagenator = browser.find_element_by_id('pageListNo1')
+        pagenator_select = Select(pagenator)
+        pagenator_select.select_by_visible_text(item)
+    !件数多く、Lambdaのセッション切れになってしまうため、サンプル50件で動かす!(全件取得はコメントアウトしてるコードも使う)
+    '''
+    
+    
+    #画面に表示されている建設業者50件のリンク先を取得
+    list_all = browser.find_elements_by_tag_name('a')
+    list_all_a = list_all[8:] #前から8個削除
+    list_all_b = list_all_a[:-1] #後ろから一個削除
+    link_name_list = [i.text for i in list_all_b] #リンク名のリストを作成
+    
+    #目的階層へ行きhtml取得しブラウザバック
+    for item in link_name_list:
+        obj= browser.find_element_by_link_text(item)
+        obj.click()
+        obj_html_list.append(browser.page_source)
+        browser.back()
+        browser.implicitly_wait(7)
+            
+    '''メインロジック終了'''
+    
+    
+    '''csvファイルに書き出してS3へアップロード'''
+    #ユニークな日時をファイル名に指定し、リストをcsvファイルに
+    now = datetime.datetime.now()
+    file_path_and_name = '/tmp/' + now.strftime('%Y%m%d_%H%M%S') + '.csv'
+    with open(file_path_and_name, "w") as f:
+        writer = csv.writer(f, lineterminator='\n')
+        writer.writerow(obj_html_list)
         
-    df_url_html = pd.Dataframe({'URL':url_list, 'HTML':html_list})
-    df_url_html.to_csv('samp.csv')
+    #csvファイルをS3へアップロード
+    backet_name = ''
+    savepath = now.strftime('%Y%m%d_%H%M%S') + '.csv' #バケット直下にファイルを保存
+    s3 = boto3.resource('s3')
+    s3.meta.client.upload_file(file_path_and_name, baket_name, savepath)
     
+    
+    return
+    #return json.dumps(obj_html_list, default=str, ensure_ascii=False)
